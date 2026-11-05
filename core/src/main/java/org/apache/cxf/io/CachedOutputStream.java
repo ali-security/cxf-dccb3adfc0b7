@@ -22,6 +22,7 @@ package org.apache.cxf.io;
 import java.io.BufferedOutputStream;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.Closeable;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
@@ -91,6 +92,7 @@ public class CachedOutputStream extends OutputStream {
     private List<CachedOutputStreamCallback> callbacks;
 
     private List<Object> streamList = new ArrayList<>();
+    private CachedOutputStreamCleaner cachedOutputStreamCleaner;
 
     public CachedOutputStream() {
         this(defaultThreshold);
@@ -118,6 +120,8 @@ public class CachedOutputStream extends OutputStream {
             if (v != null) {
                 cipherTransformation = v;
             }
+
+            cachedOutputStreamCleaner = b.getExtension(CachedOutputStreamCleaner.class);
         }
     }
 
@@ -267,6 +271,11 @@ public class CachedOutputStream extends OutputStream {
                     }
                 } finally {
                     streamList.remove(currentStream);
+                    // we are not backed by file anymore, unregister from the cleaner
+                    if (cachedOutputStreamCleaner != null) {
+                        cachedOutputStreamCleaner.unregister(currentStream);
+                        cachedOutputStreamCleaner.unregister(this);
+                    }
                     deleteTempFile();
                     inmem = true;
                 }
@@ -469,6 +478,9 @@ public class CachedOutputStream extends OutputStream {
             bout.writeTo(currentStream);
             inmem = false;
             streamList.add(currentStream);
+            if (cachedOutputStreamCleaner != null) {
+                cachedOutputStreamCleaner.register(this);
+            }
         } catch (Exception ex) {
             //Could be IOException or SecurityException or other issues.
             //Don't care what, just keep it in memory.
@@ -500,6 +512,10 @@ public class CachedOutputStream extends OutputStream {
         try {
             InputStream fileInputStream = new TransferableFileInputStream(tempFile);
             streamList.add(fileInputStream);
+            if (cachedOutputStreamCleaner != null) {
+                cachedOutputStreamCleaner.register(fileInputStream);
+            }
+
             if (cipherTransformation != null) {
                 fileInputStream = new CipherInputStream(fileInputStream, ciphers.getDecryptor()) {
                     boolean closed;
@@ -525,7 +541,7 @@ public class CachedOutputStream extends OutputStream {
             FileUtils.delete(file);
         }
     }
-    private boolean maybeDeleteTempFile(Object stream) {
+    private boolean maybeDeleteTempFile(Closeable stream) {
         boolean postClosedInvoked = false;
         streamList.remove(stream);
         if (!inmem && tempFile != null && streamList.isEmpty() && allowDeleteOfFile) {
@@ -537,6 +553,9 @@ public class CachedOutputStream extends OutputStream {
                     //ignore
                 }
                 postClosedInvoked = true;
+                if (cachedOutputStreamCleaner != null) {
+                    cachedOutputStreamCleaner.unregister(this);
+                }
             }
             deleteTempFile();
             currentStream = new LoadingByteArrayOutputStream(1024);
@@ -643,6 +662,9 @@ public class CachedOutputStream extends OutputStream {
             if (!closed) {
                 super.close();
                 maybeDeleteTempFile(this);
+                if (cachedOutputStreamCleaner != null) {
+                    cachedOutputStreamCleaner.unregister(this);
+                }
             }
             closed = true;
         }
