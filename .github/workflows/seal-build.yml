@@ -1,0 +1,149 @@
+name: seal-build
+
+# Upstream Apache CXF 3.2.4 ships no GitHub Actions CI; this workflow mirrors
+# BUILDING.txt (mvn install on JDK 8). Job "core" builds and tests the shipped
+# cxf-core jar (core and its reactor prerequisites). Job "patched-modules" runs
+# the unit suites of the other modules whose sources the security fixes touch
+# (aegis, jaxrs frontend, rs client, http transport, ws-rm, tools) plus the
+# affected systests. Upstream's default-profile checkstyle, PMD and enforcer
+# checks stay enabled.
+
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "Optional surefire -Dtest selector; empty runs the full suite"
+        required: false
+        default: ""
+
+env:
+  MAVEN_OPTS: "-Xmx3g -XX:MaxMetaspaceSize=768m"
+  # Release-only attachments (javadoc/sources jars, signatures, RAT report);
+  # none of them is part of the cxf-core jar we ship.
+  RELEASE_SKIPS: "-Dmaven.javadoc.skip=true -Dsource.skip=true -Dgpg.skip=true -Drat.skip=true"
+  # Maven Central answers bursts from shared runners with HTTP 429; back off and retry.
+  MAVEN_ARGS: "-Daether.connector.http.retryHandler.count=8 -Daether.connector.http.retryHandler.interval=15000 -Daether.connector.http.retryHandler.serviceUnavailable=429,503"
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 8
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "8"
+
+      - name: Install Maven 3.9.5
+        run: |
+          curl -fsSL https://archive.apache.org/dist/maven/maven-3/3.9.5/binaries/apache-maven-3.9.5-bin.tar.gz | tar xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/apache-maven-3.9.5/bin" >> "$GITHUB_PATH"
+
+      - name: Versions
+        run: |
+          java -version
+          mvn -version
+
+      # -Dinvoker.skip: -am pulls in cxf-codegen-plugin, whose invoker IT
+      # "jdk6-cxf-with-toolchain" needs a JDK 6 toolchain that is not installed.
+      - name: Build and test cxf-core (with reactor prerequisites)
+        env:
+          TEST_FILTER: ${{ inputs.test-filter }}
+        run: |
+          if [ -n "$TEST_FILTER" ]; then
+            mvn -B -ntp clean install -pl core -am -Dinvoker.skip=true -Dtest="$TEST_FILTER" \
+              -DfailIfNoTests=false -Dsurefire.failIfNoSpecifiedTests=false $RELEASE_SKIPS
+          else
+            mvn -B -ntp clean install -pl core -am -Dinvoker.skip=true $RELEASE_SKIPS
+          fi
+
+      - name: Report test totals and skipped tests with reasons
+        if: always()
+        run: python3 .github/seal-test-report.py
+
+      - name: Upload jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: cxf-core
+          path: |
+            core/target/cxf-core-*.jar
+            !core/target/cxf-core-*-tests.jar
+            !core/target/cxf-core-*-sources.jar
+            !core/target/cxf-core-*-javadoc.jar
+          if-no-files-found: error
+
+  patched-modules:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 8
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "8"
+
+      - name: Install Maven 3.9.5
+        run: |
+          curl -fsSL https://archive.apache.org/dist/maven/maven-3/3.9.5/binaries/apache-maven-3.9.5-bin.tar.gz | tar xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/apache-maven-3.9.5/bin" >> "$GITHUB_PATH"
+
+      # testutils is built from source: the cxf-testutils 3.2.4 jar on Central
+      # embeds the release manager's absolute /Users/... wsdlLocation paths.
+      - name: Install reactor (patched modules + systests), tests run below
+        # Retried only to ride out Central rate limiting; no tests run in this step.
+        run: |
+          for i in 1 2 3; do
+            mvn -B -ntp clean install \
+              -pl testutils,rt/databinding/aegis,rt/frontend/jaxrs,rt/rs/client,rt/transports/http,rt/ws/rm,tools/common,tools/wsdlto/test,systests/jaxrs,systests/jaxws,systests/databinding -am \
+              -DskipTests -Dinvoker.skip=true $RELEASE_SKIPS && exit 0
+            echo "install attempt $i failed; retrying after back-off"; sleep 60
+          done
+          exit 1
+
+      # tools/wsdlto/databinding/jaxb has no src/test; its JAXBDataBinding is
+      # exercised by the wsdl2java code-generation suite in tools/wsdlto/test.
+      # "install", not "test": like upstream's full build, reactor siblings must
+      # be packaged jars. Under "mvn test" they resolve as target/classes dirs and
+      # tools' WSDL11Validator classpath schema lookup falls back to http URLs
+      # (accessExternalSchema SAXParseException in the codegen suite).
+      - name: Unit suites of patched modules
+        env:
+          TEST_FILTER: ${{ inputs.test-filter }}
+        run: |
+          MODS=rt/databinding/aegis,rt/frontend/jaxrs,rt/rs/client,rt/transports/http,rt/ws/rm,tools/common,tools/wsdlto/test
+          if [ -n "$TEST_FILTER" ]; then
+            mvn -B -ntp install -fae -pl "$MODS" -Dinvoker.skip=true -Dtest="$TEST_FILTER" \
+              -DfailIfNoTests=false -Dsurefire.failIfNoSpecifiedTests=false $RELEASE_SKIPS
+          else
+            mvn -B -ntp install -fae -pl "$MODS" -Dinvoker.skip=true $RELEASE_SKIPS
+          fi
+
+      - name: Systests - JAX-RS Spring book (jaxrs)
+        env:
+          TEST_FILTER: ${{ inputs.test-filter || 'JAXRSClientServerSpringBookTest' }}
+        run: |
+          mvn -B -ntp test -pl systests/jaxrs -Dtest="$TEST_FILTER" \
+            -DfailIfNoTests=false -Dsurefire.failIfNoSpecifiedTests=false $RELEASE_SKIPS
+
+      - name: Systests - JAX-WS client/server (jaxws)
+        env:
+          TEST_FILTER: ${{ inputs.test-filter || 'org.apache.cxf.systest.jaxws.ClientServerTest' }}
+        run: |
+          mvn -B -ntp test -pl systests/jaxws -Dtest="$TEST_FILTER" \
+            -DfailIfNoTests=false -Dsurefire.failIfNoSpecifiedTests=false $RELEASE_SKIPS
+
+      - name: Systests - MTOM base64 attachments (databinding)
+        env:
+          TEST_FILTER: ${{ inputs.test-filter || 'MTOMBase64Test' }}
+        run: |
+          mvn -B -ntp test -pl systests/databinding -Dtest="$TEST_FILTER" \
+            -DfailIfNoTests=false -Dsurefire.failIfNoSpecifiedTests=false $RELEASE_SKIPS
+
+      - name: Report test totals and skipped tests with reasons
+        if: always()
+        run: python3 .github/seal-test-report.py
