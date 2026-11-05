@@ -49,6 +49,8 @@ public class AttachmentDeserializer {
     public static final String ATTACHMENT_MEMORY_THRESHOLD = "attachment-memory-threshold";
 
     public static final String ATTACHMENT_MAX_SIZE = "attachment-max-size";
+    public static final long DEFAULT_ATTACHMENT_MAX_SIZE =
+        SystemPropertyAction.getInteger("org.apache.cxf.attachment-max-size", 50 * 1024 * 1024 /* 50 Mb */);
 
     /**
      * The maximum number of attachments permitted in a message. The default is 50.
