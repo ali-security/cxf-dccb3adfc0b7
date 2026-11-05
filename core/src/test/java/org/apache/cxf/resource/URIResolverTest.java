@@ -21,8 +21,10 @@ package org.apache.cxf.resource;
 
 import java.io.InputStream;
 import java.net.URL;
+import java.nio.file.Path;
 
 import org.apache.cxf.helpers.IOUtils;
+import org.apache.cxf.xxe.XXETestListener;
 
 import org.junit.Assert;
 import org.junit.Test;
@@ -107,6 +109,50 @@ public class URIResolverTest extends Assert {
 
         resolveWithCheckingClassloader(uriResolver, baseUriStr, uriStr, null);
         resolveWithCheckingClassloaderInConstructor(baseUriStr, uriStr, null);
+    }
+
+    /**
+     * {@code createInputStream()} now opens the connection inside
+     * {@code AccessController.doPrivileged}. Resolution must keep working with a SecurityManager
+     * installed, and the {@code ClassCastException} that drives the non-HTTP fallback must still
+     * escape unwrapped rather than being turned into a {@code PrivilegedActionException}.
+     */
+    @Test
+    public void testJARProtocolUnderSecurityManager() throws Exception {
+        try (XXETestListener securityManager = new XXETestListener()) {
+            uriResolver = new URIResolver();
+
+            String uriStr = "jar:" + resourceURL.toString() + "!/wsdl/hello_world.wsdl";
+            uriResolver.resolve("baseUriStr", uriStr, null);
+
+            assertTrue(uriResolver.isResolved());
+            InputStream is = uriResolver.getInputStream();
+            assertNotNull(is);
+            is.close();
+        }
+    }
+
+    /**
+     * An absolute {@code file:} URI is the case that actually reaches the
+     * {@code doPrivileged(openConnection)} block: the file connection is not an
+     * {@code HttpURLConnection}, so the resulting {@code ClassCastException} must still escape
+     * unwrapped and fall back to {@code openStream()} while a SecurityManager is installed.
+     */
+    @Test
+    public void testFileProtocolUnderSecurityManager() throws Exception {
+        try (XXETestListener securityManager = new XXETestListener()) {
+            String content = "<definitions name=\"resolved\"/>";
+            Path wsdl = securityManager.write("resolved.wsdl", content);
+
+            uriResolver = new URIResolver();
+            uriResolver.resolve(null, securityManager.uriOf(wsdl), null);
+
+            assertTrue(uriResolver.isResolved());
+            try (InputStream is = uriResolver.getInputStream()) {
+                assertNotNull(is);
+                assertEquals(content, IOUtils.readStringFromStream(is));
+            }
+        }
     }
 
     @Test

@@ -66,6 +66,8 @@ import org.xml.sax.Attributes;
 import org.xml.sax.InputSource;
 import org.xml.sax.Locator;
 import org.xml.sax.SAXException;
+import org.xml.sax.SAXNotRecognizedException;
+import org.xml.sax.SAXNotSupportedException;
 import org.xml.sax.SAXParseException;
 import org.xml.sax.helpers.XMLFilterImpl;
 
@@ -979,12 +981,35 @@ public class JAXBDataBinding implements DataBindingProfile {
                                final OASISCatalogManager catalog,
                                final SchemaCollection schemaCollection) throws ToolException {
         SchemaFactory schemaFact = SchemaFactory.newInstance(XMLConstants.W3C_XML_SCHEMA_NS_URI);
+        try {
+            schemaFact.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, Boolean.TRUE);
+        } catch (SAXNotRecognizedException | SAXNotSupportedException e) {
+            LOG.log(Level.WARNING, "The property '" + XMLConstants.FEATURE_SECURE_PROCESSING
+                + "' is not supported.");
+        }
+        // On the JDK's schema factory secure processing also empties accessExternalSchema, which
+        // blocks the imports/includes that the resolver below maps for the tool. Every schema
+        // reference goes through that resolver, so keep loading them; the external DTD/entity
+        // restriction that secure processing applies stays in place.
+        try {
+            schemaFact.setProperty(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "all");
+        } catch (SAXNotRecognizedException | SAXNotSupportedException e) {
+            LOG.log(Level.FINE, "The property '" + XMLConstants.ACCESS_EXTERNAL_SCHEMA
+                + "' is not supported.");
+        }
         schemaFact.setResourceResolver(new LSResourceResolver() {
             public LSInput resolveResource(String type,
                                            String namespaceURI,
                                            String publicId,
                                            String systemId,
                                            String baseURI) {
+                if (type != null && !XMLConstants.W3C_XML_SCHEMA_NS_URI.equals(type)) {
+                    // Only schema documents (import/include/redefine) are resolved here. External
+                    // entities and DTDs must not be fetched: a resource returned by this resolver
+                    // bypasses the parser's secure processing restrictions and would allow XXE.
+                    throw new ToolException("External entity or DTD is not allowed in schema: "
+                                            + systemId);
+                }
                 String s = JAXBDataBinding.mapSchemaLocation(systemId, baseURI, catalog);
                 LOG.fine("validating: " + namespaceURI + " " + systemId + " " + baseURI + " " + s);
                 if (s == null) {

@@ -26,7 +26,11 @@ package org.apache.cxf.staxutils.validation;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
+import javax.xml.XMLConstants;
+import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.parsers.SAXParserFactory;
 import javax.xml.stream.XMLStreamException;
 import javax.xml.transform.Source;
@@ -34,6 +38,8 @@ import javax.xml.transform.dom.DOMSource;
 
 import org.xml.sax.InputSource;
 import org.xml.sax.Locator;
+import org.xml.sax.SAXNotRecognizedException;
+import org.xml.sax.SAXNotSupportedException;
 
 import com.ctc.wstx.msv.BaseSchemaFactory;
 import com.ctc.wstx.msv.W3CSchema;
@@ -46,12 +52,14 @@ import com.sun.msv.reader.xmlschema.MultiSchemaReader;
 import com.sun.msv.reader.xmlschema.SchemaState;
 import com.sun.msv.reader.xmlschema.XMLSchemaReader;
 
+import org.apache.cxf.common.logging.LogUtils;
 import org.codehaus.stax2.validation.XMLValidationSchema;
 
 /**
  *
  */
 public class W3CMultiSchemaFactory extends BaseSchemaFactory {
+    private static final Logger LOG = LogUtils.getL7dLogger(W3CMultiSchemaFactory.class);
 
     private MultiSchemaReader multiSchemaReader;
     private SAXParserFactory parserFactory;
@@ -110,7 +118,22 @@ public class W3CMultiSchemaFactory extends BaseSchemaFactory {
 
     public XMLValidationSchema loadSchemas(String baseURI,
                                            Map<String, EmbeddedSchema> sources) throws XMLStreamException {
-        parserFactory = getSaxFactory();
+        // Use a dedicated, hardened factory rather than the shared one from Woodstox's
+        // BaseSchemaFactory.getSaxFactory(), which has no JAXP hardening.
+        parserFactory = SAXParserFactory.newInstance();
+        try {
+            parserFactory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, Boolean.TRUE);
+        } catch (SAXNotRecognizedException | SAXNotSupportedException | ParserConfigurationException e) {
+            LOG.log(Level.WARNING, "The property '" + XMLConstants.FEATURE_SECURE_PROCESSING
+                + "', is not supported.");
+        }
+        try {
+            parserFactory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+        } catch (SAXNotRecognizedException | SAXNotSupportedException | ParserConfigurationException e) {
+            LOG.log(Level.WARNING, "The property 'http://apache.org/xml/features/disallow-doctype-decl'"
+                    + " is not supported.");
+        }
+        parserFactory.setNamespaceAware(true);
 
         ResolvingGrammarReaderController ctrl = new ResolvingGrammarReaderController(baseURI, sources);
         xmlSchemaReader = new RecursiveAllowedXMLSchemaReader(ctrl, parserFactory);
